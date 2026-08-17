@@ -1,0 +1,338 @@
+import { app, BrowserWindow, WebContentsView, ipcMain, session, shell } from 'electron'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+import os from 'node:os'
+
+const require = createRequire(import.meta.url)
+const { autoUpdater } = require('electron-updater') as typeof import('electron-updater')
+import type { SiteConfig, SiteStatus, UpdateStatusEvent, ViewBounds } from '../../src/shared/contracts.js'
+import { SiteStore } from './site-store.js'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+process.env.APP_ROOT = path.join(__dirname, '../..')
+
+export const MAIN_DIST = path.join(process.env.APP_ROOT, 'dist-electron')
+export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
+export const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
+process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
+  ? path.join(process.env.APP_ROOT, 'public')
+  : RENDERER_DIST
+
+if (process.platform === 'win32' && os.release().startsWith('6.1')) {
+  app.disableHardwareAcceleration()
+}
+
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.relaydesk.app')
+}
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+  process.exit(0)
+}
+
+type SiteViewRecord = {
+  config: SiteConfig
+  view: WebContentsView
+}
+
+let mainWindow: BrowserWindow | null = null
+let siteStore: SiteStore
+let activeSiteId: string | null = null
+let attachedView: WebContentsView | null = null
+let viewBounds: ViewBounds = { x: 280, y: 0, width: 720, height: 640 }
+let viewVisible = true
+const siteViews = new Map<string, SiteViewRecord>()
+let updateStatus: UpdateStatusEvent = { status: 'idle' }
+
+const preload = path.join(__dirname, '../preload/index.mjs')
+const indexHtml = path.join(RENDERER_DIST, 'index.html')
+
+function isHttpUrl(value: string): boolean {
+  return value.startsWith('https://') || value.startsWith('http://')
+}
+
+function normalizeCcSwitchUrl(value: string): string | null {
+  const lowerValue = value.toLowerCase()
+  const supportedSchemes = ['ccswitch:', 'cc-switch:', 'cc_switch:']
+  const scheme = supportedSchemes.find(candidate => lowerValue.startsWith(candidate))
+  return scheme ? `ccswitch:${value.slice(scheme.length)}` : null
+}
+
+function isCcSwitchUrl(value: string): boolean {
+  return normalizeCcSwitchUrl(value) !== null
+}
+
+function sendToRenderer(channel: string, ...args: unknown[]) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, ...args)
+  }
+}
+
+function sendSiteStatus(id: string, status: SiteStatus, message?: string) {
+  sendToRenderer('site:status', { id, status, message })
+}
+
+function sendUpdateStatus(event: UpdateStatusEvent) {
+  updateStatus = event
+  sendToRenderer('app:update-status', event)
+}
+
+function configureAutoUpdater() {
+  autoUpdater.autoDownload = false
+  autoUpdater.autoInstallOnAppQuit = true
+
+  autoUpdater.on('checking-for-update', () => sendUpdateStatus({ status: 'checking' }))
+  autoUpdater.on('update-available', info => {
+    sendUpdateStatus({ status: 'available', version: info.version })
+    void autoUpdater.downloadUpdate().catch(() => undefined)
+  })
+  autoUpdater.on('update-not-available', info => {
+    sendUpdateStatus({ status: 'not-available', version: info.version })
+  })
+  autoUpdater.on('download-progress', progress => {
+    sendUpdateStatus({ status: 'downloading', percent: Math.round(progress.percent) })
+  })
+  autoUpdater.on('update-downloaded', info => {
+    sendUpdateStatus({ status: 'downloaded', version: info.version, percent: 100 })
+  })
+  autoUpdater.on('error', error => {
+    sendUpdateStatus({ status: 'error', message: error instanceof Error ? error.message : '更新检查失败。' })
+  })
+}
+
+async function checkForUpdates() {
+  if (!app.isPackaged) {
+    sendUpdateStatus({ status: 'not-available', message: '开发模式不检查更新。' })
+    return
+  }
+  try {
+    await autoUpdater.checkForUpdates()
+  } catch (error) {
+    sendUpdateStatus({ status: 'error', message: error instanceof Error ? error.message : '更新检查失败。' })
+  }
+}
+
+function installUpdate() {
+  if (updateStatus.status !== 'downloaded') return
+  autoUpdater.quitAndInstall()
+}
+
+async function openNativeProtocol(url: string) {
+  try {
+    const normalizedUrl = normalizeCcSwitchUrl(url)
+    if (!normalizedUrl) throw new Error('不受支持的 CC Switch 协议地址。')
+    await shell.openExternal(normalizedUrl)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'The native protocol could not be opened.'
+    sendToRenderer('native:protocol-error', message)
+  }
+}
+
+function createSiteView(config: SiteConfig): SiteViewRecord {
+  const siteSession = session.fromPartition(`persist:relaydesk-${config.id}`)
+  const view = new WebContentsView({
+    webPreferences: {
+      session: siteSession,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  })
+  const contents = view.webContents
+
+  contents.setWindowOpenHandler(({ url }) => {
+    if (isCcSwitchUrl(url)) {
+      void openNativeProtocol(url)
+      return { action: 'deny' }
+    }
+    if (isHttpUrl(url)) return { action: 'allow' }
+    return { action: 'deny' }
+  })
+
+  contents.on('will-navigate', (event, url) => {
+    if (isCcSwitchUrl(url)) {
+      event.preventDefault()
+      void openNativeProtocol(url)
+      return
+    }
+    if (!isHttpUrl(url)) event.preventDefault()
+  })
+
+  contents.on('did-start-loading', () => sendSiteStatus(config.id, 'loading'))
+  contents.on('did-stop-loading', () => sendSiteStatus(config.id, 'online'))
+  contents.on('did-finish-load', () => sendSiteStatus(config.id, 'online'))
+  contents.on('did-fail-load', (_event, errorCode, errorDescription, _validatedURL, isMainFrame) => {
+    if (isMainFrame && errorCode !== -3) {
+      sendSiteStatus(config.id, 'error', errorDescription)
+    }
+  })
+
+  void contents.loadURL(config.url).catch(error => {
+    const message = error instanceof Error ? error.message : 'The site could not be loaded.'
+    sendSiteStatus(config.id, 'error', message)
+  })
+
+  return { config, view }
+}
+
+function detachActiveView() {
+  if (!mainWindow || !attachedView) return
+  mainWindow.contentView.removeChildView(attachedView)
+  attachedView = null
+}
+
+function attachActiveView() {
+  if (!mainWindow || !activeSiteId || !viewVisible) return
+  const record = siteViews.get(activeSiteId)
+  if (!record) return
+
+  if (attachedView !== record.view) {
+    detachActiveView()
+    mainWindow.contentView.addChildView(record.view)
+    attachedView = record.view
+  }
+  record.view.setBounds(viewBounds)
+}
+
+function syncSiteViews(sites: SiteConfig[]) {
+  const nextIds = new Set(sites.map(site => site.id))
+  for (const [id, record] of siteViews) {
+    if (!nextIds.has(id)) {
+      if (attachedView === record.view) detachActiveView()
+      record.view.webContents.close()
+      siteViews.delete(id)
+    }
+  }
+
+  for (const site of sites) {
+    const existing = siteViews.get(site.id)
+    if (!existing) continue
+    const urlChanged = existing.config.url !== site.url
+    existing.config = site
+    if (urlChanged) {
+      void existing.view.webContents.loadURL(site.url).catch(error => {
+        const message = error instanceof Error ? error.message : 'The site could not be loaded.'
+        sendSiteStatus(site.id, 'error', message)
+      })
+    }
+  }
+}
+
+async function activateSite(id: string | null) {
+  if (id && !siteStore.list().some(site => site.id === id && site.enabled)) return
+  activeSiteId = id
+  viewVisible = true
+  if (!id) {
+    detachActiveView()
+    return
+  }
+
+  if (!siteViews.has(id)) {
+    const config = siteStore.list().find(site => site.id === id)
+    if (config) siteViews.set(id, createSiteView(config))
+  }
+  attachActiveView()
+}
+
+function registerIpcHandlers() {
+  ipcMain.handle('sites:list', () => siteStore.list())
+
+  ipcMain.handle('sites:save', async (_event, value: unknown) => {
+    if (!Array.isArray(value)) throw new Error('Sites must be an array.')
+    const saved = await siteStore.replace(value as SiteConfig[])
+    syncSiteViews(saved)
+    if (activeSiteId && !saved.some(site => site.id === activeSiteId && site.enabled)) {
+      await activateSite(null)
+    }
+    return saved
+  })
+
+  ipcMain.handle('workspace:activate', async (_event, id: unknown) => {
+    if (id !== null && typeof id !== 'string') throw new Error('Invalid site id.')
+    await activateSite(id)
+  })
+
+  ipcMain.handle('workspace:set-bounds', (_event, value: unknown) => {
+    if (!value || typeof value !== 'object') return
+    const candidate = value as Partial<ViewBounds>
+    const nextBounds: ViewBounds = {
+      x: Math.max(0, Math.round(Number(candidate.x) || 0)),
+      y: Math.max(0, Math.round(Number(candidate.y) || 0)),
+      width: Math.max(1, Math.round(Number(candidate.width) || 1)),
+      height: Math.max(1, Math.round(Number(candidate.height) || 1)),
+    }
+    viewBounds = nextBounds
+    attachedView?.setBounds(viewBounds)
+  })
+
+  ipcMain.handle('workspace:set-visible', (_event, visible: unknown) => {
+    viewVisible = Boolean(visible)
+    if (viewVisible) attachActiveView()
+    else detachActiveView()
+  })
+
+  ipcMain.handle('workspace:reload', (_event, id: unknown) => {
+    if (typeof id !== 'string') throw new Error('Invalid site id.')
+    siteViews.get(id)?.view.webContents.reload()
+  })
+
+  ipcMain.handle('app:update-check', () => checkForUpdates())
+  ipcMain.handle('app:update-install', () => installUpdate())
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    title: 'RelayDesk',
+    minWidth: 980,
+    minHeight: 640,
+    width: 1320,
+    height: 820,
+    backgroundColor: '#0d1117',
+    webPreferences: {
+      preload,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  })
+
+  if (VITE_DEV_SERVER_URL) mainWindow.loadURL(VITE_DEV_SERVER_URL)
+  else mainWindow.loadFile(indexHtml)
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isHttpUrl(url)) void shell.openExternal(url)
+    return { action: 'deny' }
+  })
+
+  mainWindow.on('closed', () => {
+    detachActiveView()
+    mainWindow = null
+  })
+}
+
+app.whenReady().then(async () => {
+  siteStore = new SiteStore(app.getPath('userData'))
+  await siteStore.load()
+  configureAutoUpdater()
+  registerIpcHandlers()
+  createWindow()
+})
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('second-instance', () => {
+  if (!mainWindow) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.focus()
+})
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  else mainWindow?.focus()
+})

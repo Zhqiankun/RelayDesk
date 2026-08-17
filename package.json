@@ -1,0 +1,40 @@
+{
+  "name": "relaydesk",
+  "version": "0.1.0",
+  "main": "dist-electron/main/index.js",
+  "description": "A focused desktop workspace for web relay stations.",
+  "author": "RelayDesk contributors",
+  "license": "MIT",
+  "private": false,
+  "homepage": "https://github.com/Zhqiankun/RelayDesk",
+  "keywords": [
+    "electron",
+    "rollup",
+    "vite",
+    "vue3",
+    "vue"
+  ],
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "vue-tsc --noEmit",
+    "lint": "vue-tsc --noEmit",
+    "build": "vue-tsc --noEmit && vite build && electron-builder",
+    "build:release": "vue-tsc --noEmit && vite build && electron-builder --win --publish always",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.7",
+    "electron": "^42.1.0",
+    "electron-builder": "^26.8.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "vite-plugin-electron": "^1.0.1",
+    "vite-plugin-electron-renderer": "^1.0.0",
+    "vue": "^3.5.35",
+    "vue-tsc": "^3.3.3"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  }
+}
