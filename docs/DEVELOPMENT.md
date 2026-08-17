@@ -38,8 +38,9 @@ execution, or the filesystem.
 
 The main process owns native capabilities and the lifetime of remote views. A
 site is represented by stable data (`id`, `name`, `url`, `icon`, `partition`)
-rather than a Vue component. Views are created lazily and reused when the user
-switches back.
+rather than a Vue component. Enabled views are created and loaded in the
+background at startup, then reused when the user switches between sites. Only
+the selected view is attached to the window at a time.
 
 ### Sessions
 
@@ -118,6 +119,8 @@ The interface is a quiet, dense desktop tool rather than a marketing page:
 - CC Switch links are not rendered as broken pages and can wake the local
   handler when CC Switch has registered the `ccswitch` protocol.
 - A packaged build can check, download, and install a newer GitHub Release.
+- Minimizing or closing the window hides the app in the system tray; the tray
+  menu can reopen or exit it.
 - Type check and production build pass; manual site and protocol checks are
   reported separately.
 
@@ -126,5 +129,5 @@ The interface is a quiet, dense desktop tool rather than a marketing page:
 - Split view and background tab throttling.
 - Site-specific adapters or DOM automation.
 - Unified search/history across remote sites.
-- Notifications and tray behavior.
+- Notifications.
 - Installer signing and automatic update distribution.

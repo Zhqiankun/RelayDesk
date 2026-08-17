@@ -1,6 +1,6 @@
 {
   "name": "relaydesk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "main": "dist-electron/main/index.js",
   "description": "A focused desktop workspace for web relay stations.",
   "author": "RelayDesk contributors",

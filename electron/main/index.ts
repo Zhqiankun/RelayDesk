@@ -1,8 +1,9 @@
-import { app, BrowserWindow, WebContentsView, ipcMain, session, shell } from 'electron'
+import { app, BrowserWindow, Menu, nativeImage, Tray, WebContentsView, ipcMain, session, shell } from 'electron'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
+import type { MenuItemConstructorOptions } from 'electron'
 
 const require = createRequire(import.meta.url)
 const { autoUpdater } = require('electron-updater') as typeof import('electron-updater')
@@ -39,6 +40,8 @@ type SiteViewRecord = {
 }
 
 let mainWindow: BrowserWindow | null = null
+let tray: Tray | null = null
+let isQuitting = false
 let siteStore: SiteStore
 let activeSiteId: string | null = null
 let attachedView: WebContentsView | null = null
@@ -49,6 +52,42 @@ let updateStatus: UpdateStatusEvent = { status: 'idle' }
 
 const preload = path.join(__dirname, '../preload/index.mjs')
 const indexHtml = path.join(RENDERER_DIST, 'index.html')
+const repositoryUrl = 'https://github.com/Zhqiankun/RelayDesk'
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+function quitApplication() {
+  isQuitting = true
+  app.quit()
+}
+
+function createTray() {
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'relaydesk.ico')
+    : path.join(process.env.APP_ROOT, 'build', 'relaydesk.ico')
+  const icon = nativeImage.createFromPath(iconPath)
+  if (icon.isEmpty()) {
+    console.warn(`[RelayDesk] Tray icon could not be loaded: ${iconPath}`)
+    return
+  }
+
+  tray = new Tray(icon)
+  tray.setToolTip('RelayDesk')
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '打开 RelayDesk', click: showMainWindow },
+    { type: 'separator' },
+    { label: '退出 RelayDesk', click: quitApplication },
+  ]))
+  tray.on('click', () => {
+    if (mainWindow?.isVisible()) mainWindow.hide()
+    else showMainWindow()
+  })
+}
 
 function isHttpUrl(value: string): boolean {
   return value.startsWith('https://') || value.startsWith('http://')
@@ -63,6 +102,63 @@ function normalizeCcSwitchUrl(value: string): string | null {
 
 function isCcSwitchUrl(value: string): boolean {
   return normalizeCcSwitchUrl(value) !== null
+}
+
+function createApplicationMenu() {
+  const template: MenuItemConstructorOptions[] = [
+    {
+      label: '文件',
+      submenu: [
+        { label: '关闭窗口', role: 'close' },
+        { label: '退出 RelayDesk', click: quitApplication },
+      ],
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { label: '撤销', role: 'undo' },
+        { label: '重做', role: 'redo' },
+        { type: 'separator' },
+        { label: '剪切', role: 'cut' },
+        { label: '复制', role: 'copy' },
+        { label: '粘贴', role: 'paste' },
+        { label: '全选', role: 'selectAll' },
+      ],
+    },
+    {
+      label: '查看',
+      submenu: [
+        { label: '重新加载', role: 'reload' },
+        { label: '强制重新加载', role: 'forceReload' },
+        { type: 'separator' },
+        { label: '开发者工具', role: 'toggleDevTools' },
+        { type: 'separator' },
+        { label: '实际大小', role: 'resetZoom' },
+        { label: '放大', role: 'zoomIn' },
+        { label: '缩小', role: 'zoomOut' },
+        { type: 'separator' },
+        { label: '全屏', role: 'togglefullscreen' },
+      ],
+    },
+    {
+      label: '窗口',
+      submenu: [
+        { label: '最小化', role: 'minimize' },
+        { label: '缩放', role: 'zoom' },
+      ],
+    },
+    {
+      label: '帮助',
+      submenu: [
+        {
+          label: 'RelayDesk 项目主页',
+          click: () => void shell.openExternal(repositoryUrl).catch(() => undefined),
+        },
+      ],
+    },
+  ]
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
 function sendToRenderer(channel: string, ...args: unknown[]) {
@@ -180,19 +276,22 @@ function createSiteView(config: SiteConfig): SiteViewRecord {
 }
 
 function detachActiveView() {
-  if (!mainWindow || !attachedView) return
-  mainWindow.contentView.removeChildView(attachedView)
+  const window = mainWindow
+  const view = attachedView
   attachedView = null
+  if (!window || window.isDestroyed() || !view) return
+  window.contentView.removeChildView(view)
 }
 
 function attachActiveView() {
-  if (!mainWindow || !activeSiteId || !viewVisible) return
+  const window = mainWindow
+  if (!window || window.isDestroyed() || !activeSiteId || !viewVisible) return
   const record = siteViews.get(activeSiteId)
   if (!record) return
 
   if (attachedView !== record.view) {
     detachActiveView()
-    mainWindow.contentView.addChildView(record.view)
+    window.contentView.addChildView(record.view)
     attachedView = record.view
   }
   record.view.setBounds(viewBounds)
@@ -201,9 +300,10 @@ function attachActiveView() {
 function syncSiteViews(sites: SiteConfig[]) {
   const nextIds = new Set(sites.map(site => site.id))
   for (const [id, record] of siteViews) {
-    if (!nextIds.has(id)) {
+    const nextSite = sites.find(site => site.id === id)
+    if (!nextIds.has(id) || !nextSite?.enabled) {
       if (attachedView === record.view) detachActiveView()
-      record.view.webContents.close()
+      if (!record.view.webContents.isDestroyed()) record.view.webContents.close()
       siteViews.delete(id)
     }
   }
@@ -218,6 +318,12 @@ function syncSiteViews(sites: SiteConfig[]) {
         const message = error instanceof Error ? error.message : 'The site could not be loaded.'
         sendSiteStatus(site.id, 'error', message)
       })
+    }
+  }
+
+  for (const site of sites) {
+    if (site.enabled && !siteViews.has(site.id)) {
+      siteViews.set(site.id, createSiteView(site))
     }
   }
 }
@@ -308,8 +414,21 @@ function createWindow() {
     return { action: 'deny' }
   })
 
+  mainWindow.on('close', event => {
+    if (isQuitting) return
+    event.preventDefault()
+    mainWindow?.hide()
+  })
+
+  mainWindow.on('minimize', event => {
+    if (isQuitting) return
+    event.preventDefault()
+    mainWindow?.hide()
+  })
+
   mainWindow.on('closed', () => {
     detachActiveView()
+    siteViews.clear()
     mainWindow = null
   })
 }
@@ -319,20 +438,34 @@ app.whenReady().then(async () => {
   await siteStore.load()
   configureAutoUpdater()
   registerIpcHandlers()
+  createApplicationMenu()
+  createTray()
   createWindow()
+  syncSiteViews(siteStore.list())
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  if (isQuitting || process.platform === 'darwin') app.quit()
+})
+
+app.on('before-quit', () => {
+  isQuitting = true
+})
+
+app.on('will-quit', () => {
+  tray?.destroy()
+  tray = null
 })
 
 app.on('second-instance', () => {
   if (!mainWindow) return
-  if (mainWindow.isMinimized()) mainWindow.restore()
-  mainWindow.focus()
+  showMainWindow()
 })
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow()
+    syncSiteViews(siteStore.list())
+  }
   else mainWindow?.focus()
 })

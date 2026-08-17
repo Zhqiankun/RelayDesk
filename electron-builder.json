@@ -17,6 +17,12 @@
     "dist",
     "dist-electron"
   ],
+  "extraResources": [
+    {
+      "from": "build/relaydesk.ico",
+      "to": "relaydesk.ico"
+    }
+  ],
   "mac": {
     "icon": "build/relaydesk-icon.png",
     "target": [

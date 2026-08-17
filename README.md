@@ -26,8 +26,11 @@ in [AGENTS.md](AGENTS.md).
 
 - Add, edit, reorder, enable, and remove site entries.
 - Keep one active remote site visible at a time.
+- Preload enabled sites in the background so switching is immediate.
 - Persist site metadata and per-site Chromium sessions locally.
 - Preserve HTTP(S) navigation and native `ccswitch://` / `cc-switch://` handoff.
+- Minimizing or closing the window hides RelayDesk in the Windows system tray;
+  the tray menu can reopen or exit the app.
 
 ## CC Switch Requirement
 
